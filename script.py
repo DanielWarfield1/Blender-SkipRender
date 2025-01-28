@@ -2,11 +2,34 @@ import os
 import shutil
 import subprocess
 import sys
+from argparse import ArgumentParser
 
 import bpy
 
 
-def hash_frame(scene):
+def parse_args():
+    try:
+        separator_index = sys.argv.index("--")
+    except ValueError:
+        raise Exception("no arguments supplied")
+
+    parser = ArgumentParser(prog="Blender-SkipRender")
+    parser.add_argument("-o", "--output")
+    parser.add_argument("-t", "--temp")
+
+    args = parser.parse_args(sys.argv[separator_index + 1 :])
+    os.makedirs(os.path.dirname(os.path.realpath(args.output)), exist_ok=True)
+    os.makedirs(args.temp, exist_ok=True)
+
+    return args
+
+
+scene = bpy.context.scene
+args = parse_args()
+
+
+def hash_frame():
+    global scene
     slopes = []
 
     def process(value):
@@ -46,12 +69,14 @@ def hash_frame(scene):
     return " ".join([str(slope) for slope in slopes])
 
 
-def render(base_path, scene):
+def render():
+    global scene, args
+
     prev = (None, None)
     for i in range(scene.frame_start, scene.frame_end):
         scene.frame_set(i)
-        current_path = os.path.join(base_path, f"images/{i}.png")
-        current_hash = hash_frame(scene)
+        current_path = os.path.join(args.temp, f"images/{i}.png")
+        current_hash = hash_frame()
 
         if prev[0] != current_hash:
             prev = (current_hash, i)
@@ -59,50 +84,33 @@ def render(base_path, scene):
             bpy.ops.render.render(write_still=True, scene=scene.name)
         else:
             shutil.copyfile(
-                os.path.join(base_path, f"images/{prev[1]}.png"),
+                os.path.join(args.temp, f"images/{prev[1]}.png"),
                 current_path,
             )
 
 
-def stitch(base_path, scene):
+def stitch():
+    global scene, args
+
     subprocess.run(
         [
             "ffmpeg",
             "-y",
             "-i",
-            os.path.join(base_path, "audio.flac"),
+            os.path.join(args.temp, "audio.flac"),
             "-framerate",
             str(scene.render.fps),
             "-start_number",
             str(scene.frame_start),
             "-i",
-            os.path.join(base_path, "images/%d.png"),
+            os.path.join(args.temp, "images/%d.png"),
             "-frames:v",
             str(scene.frame_end - scene.frame_start),
-            os.path.join(base_path, "output.mov"),
+            args.output,
         ]
     )
 
 
-def parse_args(expected):
-    try:
-        separator_index = sys.argv.index("--")
-    except ValueError:
-        raise Exception("no arguments supplied")
-
-    args = sys.argv[separator_index + 1 :]
-    assert len(args) >= expected, "expected more arguments"
-
-    return args
-
-
-args = parse_args(1)
-base_path = args[0]
-assert os.path.exists(base_path), "base path does not exist"
-
-bpy.ops.sound.mixdown(filepath=os.path.join(base_path, "audio.flac"))
-
-scene = bpy.context.scene
-render(base_path, scene)
-
-stitch(base_path, scene)
+bpy.ops.sound.mixdown(filepath=os.path.join(args.temp, "audio.flac"))
+render()
+stitch()
