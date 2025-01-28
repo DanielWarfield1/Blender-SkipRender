@@ -50,4 +50,9 @@ args = parse_args(1)
 base_path = args[0]
 assert os.path.exists(base_path), "base path does not exist"
 
-render(base_path, bpy.context.scene)
+# audio
+bpy.ops.sound.mixdown(filepath=os.path.join(base_path, "audio.flac"))
+
+# rendering
+scene = bpy.context.scene
+render(base_path, scene)
