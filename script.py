@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import sys
 
 import bpy
@@ -34,6 +35,26 @@ def render(base_path, scene):
             )
 
 
+def stitch(base_path, scene):
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            os.path.join(base_path, "audio.flac"),
+            "-framerate",
+            str(scene.render.fps),
+            "-start_number",
+            str(scene.frame_start),
+            "-i",
+            os.path.join(base_path, "images/%d.png"),
+            "-frames:v",
+            str(scene.frame_end - scene.frame_start),
+            os.path.join(base_path, "output.mov"),
+        ]
+    )
+
+
 def parse_args(expected):
     try:
         separator_index = sys.argv.index("--")
@@ -50,9 +71,9 @@ args = parse_args(1)
 base_path = args[0]
 assert os.path.exists(base_path), "base path does not exist"
 
-# audio
 bpy.ops.sound.mixdown(filepath=os.path.join(base_path, "audio.flac"))
 
-# rendering
 scene = bpy.context.scene
 render(base_path, scene)
+
+stitch(base_path, scene)
