@@ -9,10 +9,7 @@
     in
     {
       devShells.x86_64-linux.default = pkgs.mkShell {
-        packages = with pkgs; [
-          python312
-          blender
-        ];
+        packages = [ pkgs.blender pkgs.ffmpeg ];
       };
     };
 }
