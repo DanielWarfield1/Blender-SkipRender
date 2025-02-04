@@ -7,11 +7,11 @@ import bpy
 from .hash import hash_frame
 
 bl_info = {
-    "name": "Sleek Addon",
+    "name": "Skip Renderer",
     "blender": (3, 0, 0),
     "category": "Render",
     "author": "Daniel Warfield",
-    "description": "A sleek addon with processing, progress, stop button, and file persistence",
+    "description": "A renderer that analyzes f-curves, uses those to approximate duplicate frames, and skips them. ",
 }
 
 
