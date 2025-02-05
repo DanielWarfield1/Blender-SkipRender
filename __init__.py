@@ -83,10 +83,21 @@ bl_info = {
     "name": "Skip Renderer",
     "blender": (3, 0, 0),
     "category": "Render",
-    "author": "Daniel Warfield (Modified by ChatGPT)",
+    "author": "Daniel Warfield)",
     "description": "A renderer that analyzes F-Curves, approximates duplicate frames, and skips them.",
 }
 
+# Addon Preferences for storing persistent data
+class SleekAddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
+    output_dir: bpy.props.StringProperty(
+        name="Output Directory",
+        description="Select an output directory",
+        subtype="DIR_PATH",
+    )
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "output_dir")
 
 #############################
 # Operators
@@ -197,8 +208,8 @@ def process():
     # Use the new logic to check for changes.
     changed = detect_changing()
 
-    # Compare with the previous frame’s differences.
-    is_duplicate_frame = changed == _process_state.get("prev_changed", set())
+    # True if no f-curve changed, i.e. duplicate frame.
+    is_duplicate_frame = not bool(changed)
 
     if is_duplicate_frame:
         print(f"Frame {scene.i}: Skipped (duplicate).")
@@ -442,7 +453,7 @@ class PANEL_PT_Sleek(bpy.types.Panel):
 #############################
 
 def register():
-    bpy.utils.register_class(SleekAddonPreferences)  # Assumes you have this class defined in your preferences.
+    bpy.utils.register_class(SleekAddonPreferences)
     bpy.utils.register_class(PROCESS_OT_Sleek)
     bpy.utils.register_class(STOP_OT_Sleek)
     bpy.utils.register_class(OPENFOLDER_OT_Sleek)
