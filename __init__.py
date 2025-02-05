@@ -10,42 +10,36 @@ import bpy
 # Utility Functions
 #############################
 
-def detect_changing():
-    """ Detect objects and materials that change between the previous and current frame. """
+def detect_changing(epsilon=1e-8):
+    """
+    Detect differences in all F-Curves between the current frame and the previous frame.
+    
+    Returns:
+      A set of tuples (data_name, data_path) for every F-Curve whose value differs 
+      between the current frame and the previous frame.
+    """
     scene = bpy.context.scene
-    frame = scene.frame_current
-    prev_frame = max(frame - 1, scene.frame_start)
-
-    changed_objects = set()
-    changed_materials = set()
-
-    def process(value, name, kind):
-        """ Checks if an f-curve exists with a non-zero slope. """
-        if not (hasattr(value, "animation_data") and value.animation_data and value.animation_data.action):
-            return
-
-        for fcurve in value.animation_data.action.fcurves:
-            if abs(fcurve.evaluate(frame) - fcurve.evaluate(prev_frame)) > 1e-8:
-                (changed_objects if kind == "object" else changed_materials).add(name)
-                break  # No need to check further curves for this entity
-
-    for obj in scene.objects:
-        process(obj, obj.name, "object")
-        for modifier in obj.modifiers:
-            process(modifier, obj.name, "object")
-        for slot in obj.material_slots:
-            if slot.material:
-                process(slot.material, slot.material.name, "material")
-                if slot.material.use_nodes and slot.material.node_tree:
-                    process(slot.material.node_tree, slot.material.name, "material")
-
-    return changed_objects, changed_materials
+    current_frame = scene.frame_current
+    # When at the first frame, use it as its own "previous" frame.
+    prev_frame = max(scene.frame_start, current_frame - 1)
+    differences = set()
+    
+    # Loop over every action and its f-curves
+    for action in bpy.data.actions:
+        for fcurve in action.fcurves:
+            val_curr = fcurve.evaluate(current_frame)
+            val_prev = fcurve.evaluate(prev_frame)
+            if abs(val_curr - val_prev) > epsilon:
+                data_name = getattr(fcurve.id_data, "name", "(No ID)")
+                data_path = fcurve.data_path
+                differences.add((data_name, data_path))
+    return differences
 
 
 def simulate_skip_frames(scene):
     """
-    Simulates the skip logic for the entire frame range using `detect_changing()`
-
+    Simulates the skip logic for the entire frame range using detect_changing.
+    
     Returns:
       skip_list (list of bool): True if the frame is a duplicate.
       total_skip: Count of skipped frames.
@@ -62,20 +56,18 @@ def simulate_skip_frames(scene):
 
     # Process the first frame (cannot be skipped)
     scene.frame_set(start)
-    prev_changed_objects, prev_changed_materials = detect_changing()
+    prev_changed = detect_changing()
     skip_list.append(False)
 
     # Process remaining frames
     for frame in range(start + 1, end + 1):
         scene.frame_set(frame)
-        changed_objects, changed_materials = detect_changing()
-
-        if changed_objects == prev_changed_objects and changed_materials == prev_changed_materials:
+        changed = detect_changing()
+        if changed == prev_changed:
             skip_list.append(True)
         else:
             skip_list.append(False)
-
-        prev_changed_objects, prev_changed_materials = changed_objects, changed_materials
+        prev_changed = changed
 
     scene.frame_set(original_frame)
     total_skip = sum(skip_list)
@@ -91,8 +83,8 @@ bl_info = {
     "name": "Skip Renderer",
     "blender": (3, 0, 0),
     "category": "Render",
-    "author": "Daniel Warfield",
-    "description": "A renderer that analyzes f-curves, approximates duplicate frames, and skips them.",
+    "author": "Daniel Warfield (Modified by ChatGPT)",
+    "description": "A renderer that analyzes F-Curves, approximates duplicate frames, and skips them.",
 }
 
 
@@ -100,7 +92,7 @@ bl_info = {
 # Operators
 #############################
 
-# Global variables to store state
+# Global state for processing
 _process_state = {
     "stop": False,
     "skip_list": [],
@@ -113,7 +105,8 @@ _process_state = {
     "last_rendered_path": None,
     "frame_folder": None,
     "extension": None,
-    "ema_render_time": 0.0,  # Initialize EMA for render times
+    "ema_render_time": 0.0,  # Exponential moving average for render times
+    "prev_changed": set(),
 }
 
 
@@ -142,7 +135,13 @@ class PROCESS_OT_Sleek(bpy.types.Operator):
         output_dir = os.path.join(bpy.path.abspath(prefs.output_dir), scene.name)
         os.makedirs(output_dir, exist_ok=True)
 
-        # Analyze scene to determine which frames should be skipped
+        # Optional: add audio mixdown
+        try:
+            bpy.ops.sound.mixdown(filepath=os.path.join(output_dir, "audio.flac"))
+        except Exception as e:
+            print(f"Audio mixdown error: {e}")
+
+        # Analyze scene to determine which frames should be skipped.
         skip_list, total_skip, total_render = simulate_skip_frames(scene)
         _process_state["skip_list"] = skip_list
         _process_state["total_skip"] = total_skip
@@ -151,8 +150,9 @@ class PROCESS_OT_Sleek(bpy.types.Operator):
         # Initialize tracking variables
         _process_state["last_rendered_path"] = None
         _process_state["ema_render_time"] = 0.0  # Reset EMA
+        _process_state["prev_changed"] = detect_changing()
 
-        # Prepare formats and extension
+        # Prepare image format and extension.
         render = scene.render
         formats = {
             "PNG": "png",
@@ -168,7 +168,7 @@ class PROCESS_OT_Sleek(bpy.types.Operator):
         _process_state["frame_folder"] = os.path.join(output_dir, "images")
         os.makedirs(_process_state["frame_folder"], exist_ok=True)
 
-        # Start processing
+        # Start processing via a timer.
         bpy.app.timers.register(process, first_interval=0.1)
         return {"FINISHED"}
 
@@ -182,48 +182,41 @@ def process():
         scene.sleek_running = False
         return None
 
-    # Start timing the ENTIRE frame process
+    # Timing for this frame.
     frame_start_time = time.monotonic()
-
-    # Initialize timing variables to avoid unbound errors
     render_duration = 0.0
     save_duration = 0.0
 
-    # Set current frame and generate file path
+    # Set the current frame and build the output file path.
     scene.frame_set(scene.i)
-    current_filepath = os.path.join(_process_state["frame_folder"], f"{scene.i:04d}.{_process_state['extension']}")
+    current_filepath = os.path.join(
+        _process_state["frame_folder"], f"{scene.i:04d}.{_process_state['extension']}"
+    )
     scene.render.filepath = current_filepath
 
-    # Detect changes for current frame
-    changed_objects, changed_materials = detect_changing()
+    # Use the new logic to check for changes.
+    changed = detect_changing()
 
-    # Check if current frame is a duplicate
-    is_duplicate_frame = (
-        changed_objects == _process_state.get("prev_changed_objects", set()) and
-        changed_materials == _process_state.get("prev_changed_materials", set())
-    )
+    # Compare with the previous frame’s differences.
+    is_duplicate_frame = changed == _process_state.get("prev_changed", set())
 
     if is_duplicate_frame:
         print(f"Frame {scene.i}: Skipped (duplicate).")
         if _process_state["last_rendered_path"] and os.path.exists(_process_state["last_rendered_path"]):
             if current_filepath != _process_state["last_rendered_path"]:
                 try:
-                    # Time file copy operation
                     copy_start = time.monotonic()
                     shutil.copyfile(_process_state["last_rendered_path"], current_filepath)
                     copy_duration = time.monotonic() - copy_start
 
-                    # Update timing stats for skip
                     _process_state["skip_time_total"] += copy_duration
                     _process_state["skip_count_done"] += 1
                 except Exception as e:
                     print(f"Error copying file: {e}, rendering instead.")
-                    # Fallback to rendering if copy fails
                     render_start = time.monotonic()
                     bpy.ops.render.render(write_still=True, scene=scene.name)
                     render_duration = time.monotonic() - render_start
 
-                    # Time file save operation
                     save_start = time.monotonic()
                     save_duration = time.monotonic() - save_start
 
@@ -236,7 +229,6 @@ def process():
             bpy.ops.render.render(write_still=True, scene=scene.name)
             render_duration = time.monotonic() - render_start
 
-            # Time file save operation
             save_start = time.monotonic()
             save_duration = time.monotonic() - save_start
 
@@ -249,7 +241,6 @@ def process():
         bpy.ops.render.render(write_still=True, scene=scene.name)
         render_duration = time.monotonic() - render_start
 
-        # Time file save operation
         save_start = time.monotonic()
         save_duration = time.monotonic() - save_start
 
@@ -257,18 +248,17 @@ def process():
         _process_state["render_count_done"] += 1
         _process_state["last_rendered_path"] = current_filepath
 
-    # Calculate EMA (Exponential Moving Average) for render times
-    alpha = 0.3  # Weight for recent frames (30%)
+    # Update the exponential moving average for render time.
+    alpha = 0.3
     _process_state["ema_render_time"] = (
         alpha * (render_duration + save_duration) +
         (1 - alpha) * _process_state["ema_render_time"]
     )
 
-    # Update previous frame data for next iteration
-    _process_state["prev_changed_objects"] = changed_objects
-    _process_state["prev_changed_materials"] = changed_materials
+    # Save the current differences for the next iteration.
+    _process_state["prev_changed"] = changed
 
-    # Calculate ETA using EMA
+    # Estimate the remaining time.
     render_left = _process_state["total_render"] - _process_state["render_count_done"]
     skip_left = _process_state["total_skip"] - _process_state["skip_count_done"]
 
@@ -281,16 +271,12 @@ def process():
     eta_seconds = (render_left * avg_render_time) + (skip_left * avg_skip_time)
     scene.sleek_eta = str(datetime.timedelta(seconds=round(eta_seconds)))
 
-    # Debugging output
     print(
-        f"Frame {scene.i}: "
-        f"Render={render_duration:.2f}s, "
-        f"Save={save_duration:.2f}s, "
-        f"EMA={_process_state['ema_render_time']:.2f}s, "
-        f"ETA={scene.sleek_eta}"
+        f"Frame {scene.i}: Render={render_duration:.2f}s, Save={save_duration:.2f}s, "
+        f"EMA={_process_state['ema_render_time']:.2f}s, ETA={scene.sleek_eta}"
     )
 
-        # Redraw UI
+    # Redraw the UI.
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             if area.type == "PROPERTIES":
@@ -298,12 +284,8 @@ def process():
 
     scene.i += 1
 
-    # Update progress
     total_frames = scene.frame_end - scene.frame_start + 1
-    if total_frames > 0:
-        scene.sleek_progress = (scene.i - scene.frame_start) / total_frames
-    else:
-        scene.sleek_progress = 0.0
+    scene.sleek_progress = (scene.i - scene.frame_start) / total_frames if total_frames > 0 else 0.0
 
     return 0.1
 
@@ -333,10 +315,10 @@ class OPENFOLDER_OT_Sleek(bpy.types.Operator):
             folder_path = os.path.dirname(bpy.path.abspath(prefs.output_dir))
             if os.path.exists(folder_path):
                 if os.name == "nt":
-                    os.startfile(folder_path)  # Windows
-                elif "darwin" in os.uname().sysname.lower():  # macOS
+                    os.startfile(folder_path)
+                elif "darwin" in os.uname().sysname.lower():
                     subprocess.run(["open", folder_path])
-                else:  # Linux
+                else:
                     subprocess.run(["xdg-open", folder_path])
         return {"FINISHED"}
 
@@ -344,27 +326,21 @@ class OPENFOLDER_OT_Sleek(bpy.types.Operator):
 class ANALYZE_OT_Playhead(bpy.types.Operator):
     bl_idname = "sleek.analyze_playhead"
     bl_label = "Analyze Playhead"
-    bl_description = "Show which objects/materials are non-static at the current frame"
+    bl_description = "Show F-Curve differences for the current frame"
 
     def execute(self, context):
         scene = context.scene
-        changed_objects, changed_materials = detect_changing()
+        diffs = detect_changing()
 
         lines = []
-        if not changed_objects and not changed_materials:
-            lines.append("No animated objects or materials at this frame.")
+        if not diffs:
+            lines.append("No changed F-Curves at this frame.")
         else:
-            lines.append(f"Frame {scene.frame_current} Analysis:")
+            lines.append(f"Frame {scene.frame_current} F-Curve Analysis:")
             lines.append("")
-            if changed_objects:
-                lines.append("Objects with active animation:")
-                for obj_name in sorted(changed_objects):
-                    lines.append(f"  - {obj_name}")
-                lines.append("")
-            if changed_materials:
-                lines.append("Materials with active animation:")
-                for mat_name in sorted(changed_materials):
-                    lines.append(f"  - {mat_name}")
+            lines.append("Changed F-Curves:")
+            for data_name, data_path in sorted(diffs):
+                lines.append(f" - {data_name} : {data_path}")
 
         def draw_popup(self, _context):
             for line in lines:
@@ -372,7 +348,7 @@ class ANALYZE_OT_Playhead(bpy.types.Operator):
 
         bpy.context.window_manager.popup_menu(
             draw_func=draw_popup,
-            title="Analysis Results",
+            title="F-Curve Frame Analysis",
             icon='INFO'
         )
         return {"FINISHED"}
@@ -392,22 +368,19 @@ class ANALYZE_SCENE_OT_Sleek(bpy.types.Operator):
         duplicates = 0
         original_frame = scene.frame_current
 
-        # First frame cannot be skipped
         scene.frame_set(start)
-        prev_changed_objects, prev_changed_materials = detect_changing()
+        prev_changed = detect_changing()
 
         for frame in range(start + 1, end + 1):
             scene.frame_set(frame)
-            changed_objects, changed_materials = detect_changing()
-
-            if changed_objects == prev_changed_objects and changed_materials == prev_changed_materials:
+            changed = detect_changing()
+            if changed == prev_changed:
                 duplicates += 1
+            prev_changed = changed
 
-            prev_changed_objects, prev_changed_materials = changed_objects, changed_materials
+        scene.frame_set(original_frame)
 
-        scene.frame_set(original_frame)  # Restore original frame
-
-        duplicates_pct = (duplicates / (total_frames - 1)) * 100.0  # First frame cannot be skipped
+        duplicates_pct = (duplicates / (total_frames - 1)) * 100.0 if total_frames > 1 else 0.0
 
         lines = [
             f"Analyzed frames {start} to {end}",
@@ -463,12 +436,13 @@ class PANEL_PT_Sleek(bpy.types.Panel):
         if prefs and prefs.output_dir:
             layout.operator("sleek.open_folder", icon="FILE_FOLDER")
 
+
 #############################
 # Registration
 #############################
 
 def register():
-    bpy.utils.register_class(SleekAddonPreferences)
+    bpy.utils.register_class(SleekAddonPreferences)  # Assumes you have this class defined in your preferences.
     bpy.utils.register_class(PROCESS_OT_Sleek)
     bpy.utils.register_class(STOP_OT_Sleek)
     bpy.utils.register_class(OPENFOLDER_OT_Sleek)
