@@ -1,3 +1,5 @@
+Note: Currently broken, working on it now.
+
 # Blender-SkipRender
 An accelerated workflow for rapidly rendering animations with many static frames.
 
